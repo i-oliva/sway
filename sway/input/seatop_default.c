@@ -329,6 +329,20 @@ static bool trigger_pointer_button_binding(struct sway_seat *seat,
 	return false;
 }
 
+static void sync_pointer_focus_for_surface(struct sway_seat *seat,
+		uint32_t time_msec, struct wlr_surface *surface, double sx, double sy) {
+	if (!surface || !seat_is_input_allowed(seat, surface)) {
+		return;
+	}
+
+	struct wlr_surface *focused_surface =
+		seat->wlr_seat->pointer_state.focused_surface;
+	if (focused_surface != surface) {
+		wlr_seat_pointer_notify_enter(seat->wlr_seat, surface, sx, sy);
+	}
+	wlr_seat_pointer_notify_motion(seat->wlr_seat, time_msec, sx, sy);
+}
+
 static void handle_button(struct sway_seat *seat, uint32_t time_msec,
 		struct wlr_input_device *device, uint32_t button,
 		enum wl_pointer_button_state state) {
@@ -368,6 +382,8 @@ static void handle_button(struct sway_seat *seat, uint32_t time_msec,
 			on_titlebar, on_border, on_contents, on_workspace)) {
 		return;
 	}
+
+	sync_pointer_focus_for_surface(seat, time_msec, surface, sx, sy);
 
 	// Handle clicking an empty workspace
 	if (node && node->type == N_WORKSPACE) {
@@ -793,6 +809,7 @@ static void handle_pointer_axis(struct sway_seat *seat,
 	free(dev_id);
 
 	if (!handled) {
+		sync_pointer_focus_for_surface(seat, event->time_msec, surface, sx, sy);
 		wlr_seat_pointer_notify_axis(cursor->seat->wlr_seat, event->time_msec,
 			event->orientation, scroll_factor * event->delta,
 			roundf(scroll_factor * event->delta_discrete), event->source,

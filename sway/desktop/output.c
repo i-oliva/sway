@@ -1,5 +1,6 @@
 #include <assert.h>
 #include <stdlib.h>
+#include <string.h>
 #include <strings.h>
 #include <time.h>
 #include <wayland-server-core.h>
@@ -94,6 +95,11 @@ struct send_frame_done_data {
 struct buffer_timer {
 	struct wl_listener destroy;
 	struct wl_event_source *frame_done_timer;
+};
+
+struct natively_capture_disable_data {
+	struct wlr_scene_node *nodes[16];
+	size_t nodes_len;
 };
 
 static int handle_buffer_timer(void *data) {
@@ -207,6 +213,80 @@ static enum wlr_scale_filter_mode get_scale_filter(struct sway_output *output,
 	default:
 		abort(); // unreachable
 	}
+}
+
+static bool view_is_natively(struct sway_view *view) {
+	if (!view) {
+		return false;
+	}
+
+	const char *app_id = view_get_app_id(view);
+	const char *class = view_get_class(view);
+	return
+		(app_id && strcmp(app_id, "natively") == 0) ||
+		(class && strcmp(class, "natively") == 0);
+}
+
+static void disable_natively_scene_nodes_iterator(
+		struct sway_container *con, void *user_data) {
+	struct natively_capture_disable_data *data = user_data;
+	if (!con->view || !con->scene_tree || !view_is_natively(con->view) ||
+			!con->scene_tree->node.enabled ||
+			data->nodes_len >= sizeof(data->nodes) / sizeof(data->nodes[0])) {
+		return;
+	}
+
+	data->nodes[data->nodes_len++] = &con->scene_tree->node;
+	wlr_scene_node_set_enabled(&con->scene_tree->node, false);
+}
+
+static void restore_natively_scene_nodes(
+		struct natively_capture_disable_data *data) {
+	for (size_t i = 0; i < data->nodes_len; ++i) {
+		wlr_scene_node_set_enabled(data->nodes[i], true);
+	}
+	data->nodes_len = 0;
+}
+
+struct wlr_buffer *output_capture_filter(struct wlr_output *wlr_output,
+		const struct wlr_output_state *state) {
+	struct sway_output *output = wlr_output->data;
+	if (!output || !output->scene_output ||
+			!(state->committed & WLR_OUTPUT_STATE_BUFFER)) {
+		return NULL;
+	}
+
+	output_configure_scene(output, &root->root_scene->tree.node, 1.0f);
+
+	struct natively_capture_disable_data disabled_natively = {0};
+	root_for_each_container(disable_natively_scene_nodes_iterator,
+		&disabled_natively);
+	if (disabled_natively.nodes_len == 0) {
+		return NULL;
+	}
+
+	pixman_region32_union_rect(&output->scene_output->WLR_PRIVATE.pending_commit_damage,
+		&output->scene_output->WLR_PRIVATE.pending_commit_damage, 0, 0,
+		wlr_output->width, wlr_output->height);
+	wlr_damage_ring_add_whole(&output->scene_output->damage_ring);
+
+	struct wlr_scene_output_state_options opts = {
+		.color_transform = output->color_transform,
+	};
+
+	struct wlr_output_state pending;
+	wlr_output_state_init(&pending);
+	struct wlr_buffer *filtered_buffer = NULL;
+	if (wlr_scene_output_build_state(output->scene_output, &pending, &opts) &&
+			pending.buffer != NULL) {
+		filtered_buffer = wlr_buffer_lock(pending.buffer);
+	}
+	wlr_output_state_finish(&pending);
+
+	restore_natively_scene_nodes(&disabled_natively);
+	output_configure_scene(output, &root->root_scene->tree.node, 1.0f);
+
+	return filtered_buffer;
 }
 
 void output_configure_scene(struct sway_output *output,

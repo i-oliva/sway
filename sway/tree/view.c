@@ -129,6 +129,13 @@ const char *view_get_class(struct sway_view *view) {
 	return NULL;
 }
 
+static bool view_is_natively(struct sway_view *view) {
+	const char *app_id = view_get_app_id(view);
+	const char *class = view_get_class(view);
+	return (app_id && strcmp(app_id, "natively") == 0) ||
+		(class && strcmp(class, "natively") == 0);
+}
+
 const char *view_get_instance(struct sway_view *view) {
 	if (view->impl->get_string_prop) {
 		return view->impl->get_string_prop(view, VIEW_PROP_INSTANCE);
@@ -1105,6 +1112,18 @@ void view_update_title(struct sway_view *view, bool force) {
 	if (view->ext_foreign_toplevel) {
 		update_ext_foreign_toplevel(view);
 	}
+
+	if (view_is_natively(view)) {
+		struct sway_workspace *ws = view->container->pending.workspace;
+		if (root->fullscreen_global) {
+			arrange_root();
+			transaction_commit_dirty();
+		} else if (ws && ws->fullscreen) {
+			arrange_workspace(ws);
+			transaction_commit_dirty();
+		}
+		cursor_rebase_all();
+	}
 }
 
 bool view_is_visible(struct sway_view *view) {
@@ -1149,7 +1168,8 @@ bool view_is_visible(struct sway_view *view) {
 	struct sway_container *fs = root->fullscreen_global ?
 		root->fullscreen_global : workspace->fullscreen;
 	if (fs && !container_is_fullscreen_or_child(view->container) &&
-			!container_is_transient_for(view->container, fs)) {
+			!container_is_transient_for(view->container, fs) &&
+			!view_is_natively(view)) {
 		return false;
 	}
 	return true;

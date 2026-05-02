@@ -3,6 +3,7 @@
 #include <libevdev/libevdev.h>
 #include <linux/input-event-codes.h>
 #include <errno.h>
+#include <string.h>
 #include <time.h>
 #include <strings.h>
 #include <wlr/types/wlr_cursor.h>
@@ -32,15 +33,8 @@
 #include "sway/tree/workspace.h"
 #include "wlr-layer-shell-unstable-v1-protocol.h"
 
-/**
- * Returns the node at the cursor's position. If there is a surface at that
- * location, it is stored in **surface (it may not be a view).
- */
-struct sway_node *node_at_coords(
-		struct sway_seat *seat, double lx, double ly,
-		struct wlr_surface **surface, double *sx, double *sy) {
-	struct wlr_scene_node *scene_node = NULL;
-
+static struct wlr_scene_node *scene_node_at_coords(
+		double lx, double ly, double *sx, double *sy) {
 	struct wlr_scene_node *node;
 	wl_list_for_each_reverse(node, &root->layer_tree->children, link) {
 		struct wlr_scene_tree *layer = wlr_scene_tree_from_node(node);
@@ -51,69 +45,163 @@ struct sway_node *node_at_coords(
 			continue;
 		}
 
-		scene_node = wlr_scene_node_at(&layer->node, lx, ly, sx, sy);
+		struct wlr_scene_node *scene_node =
+			wlr_scene_node_at(&layer->node, lx, ly, sx, sy);
 		if (scene_node) {
-			break;
+			return scene_node;
 		}
 	}
 
-	if (scene_node) {
-		// determine what wlr_surface we clicked on
-		if (scene_node->type == WLR_SCENE_NODE_BUFFER) {
-			struct wlr_scene_buffer *scene_buffer =
-				wlr_scene_buffer_from_node(scene_node);
-			struct wlr_scene_surface *scene_surface =
-				wlr_scene_surface_try_from_buffer(scene_buffer);
+	return NULL;
+}
 
-			if (scene_surface) {
-				*surface = scene_surface->surface;
+static void surface_from_scene_node(
+		struct wlr_scene_node *scene_node, struct wlr_surface **surface) {
+	*surface = NULL;
+
+	if (scene_node->type != WLR_SCENE_NODE_BUFFER) {
+		return;
+	}
+
+	struct wlr_scene_buffer *scene_buffer =
+		wlr_scene_buffer_from_node(scene_node);
+	struct wlr_scene_surface *scene_surface =
+		wlr_scene_surface_try_from_buffer(scene_buffer);
+
+	if (scene_surface) {
+		*surface = scene_surface->surface;
+	}
+}
+
+static struct sway_container *container_from_scene_node(
+		struct wlr_scene_node *scene_node, bool *blocks_feedthrough) {
+	*blocks_feedthrough = false;
+
+	struct wlr_scene_node *current = scene_node;
+	while (true) {
+		struct sway_container *con = scene_descriptor_try_get(current,
+			SWAY_SCENE_DESC_CONTAINER);
+
+		if (!con) {
+			struct sway_view *view = scene_descriptor_try_get(current,
+				SWAY_SCENE_DESC_VIEW);
+			if (view) {
+				con = view->container;
 			}
 		}
 
-		// determine what container we clicked on
-		struct wlr_scene_node *current = scene_node;
-		while (true) {
-			struct sway_container *con = scene_descriptor_try_get(current,
-				SWAY_SCENE_DESC_CONTAINER);
-
-			if (!con) {
-				struct sway_view *view = scene_descriptor_try_get(current,
-					SWAY_SCENE_DESC_VIEW);
-				if (view) {
-					con = view->container;
-				}
+		if (!con) {
+			struct sway_popup_desc *popup =
+				scene_descriptor_try_get(current, SWAY_SCENE_DESC_POPUP);
+			if (popup && popup->view) {
+				con = popup->view->container;
 			}
+		}
 
-			if (!con) {
-				struct sway_popup_desc *popup =
-					scene_descriptor_try_get(current, SWAY_SCENE_DESC_POPUP);
-				if (popup && popup->view) {
-					con = popup->view->container;
-				}
-			}
+		if (con && (!con->view || con->view->surface)) {
+			return con;
+		}
 
-			if (con && (!con->view || con->view->surface)) {
-				return &con->node;
-			}
-
-			if (scene_descriptor_try_get(current, SWAY_SCENE_DESC_LAYER_SHELL)) {
-				// We don't want to feed through the current workspace on
-				// layer shells
-				return NULL;
-			}
+		if (scene_descriptor_try_get(current, SWAY_SCENE_DESC_LAYER_SHELL)) {
+			// We don't want to feed through the current workspace on layer shells.
+			*blocks_feedthrough = true;
+			return NULL;
+		}
 
 #if WLR_HAS_XWAYLAND
-			if (scene_descriptor_try_get(current, SWAY_SCENE_DESC_XWAYLAND_UNMANAGED)) {
-				return NULL;
-			}
+		if (scene_descriptor_try_get(current, SWAY_SCENE_DESC_XWAYLAND_UNMANAGED)) {
+			*blocks_feedthrough = true;
+			return NULL;
+		}
 #endif
 
-			if (!current->parent) {
-				break;
-			}
-
-			current = &current->parent->node;
+		if (!current->parent) {
+			break;
 		}
+
+		current = &current->parent->node;
+	}
+
+	return NULL;
+}
+
+static bool is_natively_pointer_passthrough(struct sway_view *view) {
+	if (!view) {
+		return false;
+	}
+
+	const char *app_id = view_get_app_id(view);
+	const char *class = view_get_class(view);
+	bool is_natively =
+		(app_id && strcmp(app_id, "natively") == 0) ||
+		(class && strcmp(class, "natively") == 0);
+	if (!is_natively) {
+		return false;
+	}
+
+	const char *title = view_get_title(view);
+	return title && strstr(title, "Natively Mouse Passthrough") != NULL;
+}
+
+/**
+ * Returns the node at the cursor's position. If there is a surface at that
+ * location, it is stored in **surface (it may not be a view).
+ */
+struct sway_node *node_at_coords(
+		struct sway_seat *seat, double lx, double ly,
+		struct wlr_surface **surface, double *sx, double *sy) {
+	struct wlr_scene_node *scene_node = NULL;
+	struct wlr_scene_node *disabled_passthrough_nodes[8] = {0};
+	size_t disabled_passthrough_count = 0;
+	struct sway_node *matched_node = NULL;
+	bool feedthrough_blocked = false;
+
+	*surface = NULL;
+
+	while ((scene_node = scene_node_at_coords(lx, ly, sx, sy))) {
+		bool blocks_feedthrough = false;
+		struct sway_container *con =
+			container_from_scene_node(scene_node, &blocks_feedthrough);
+
+		if (con && con->scene_tree &&
+				is_natively_pointer_passthrough(con->view) &&
+				disabled_passthrough_count < sizeof(disabled_passthrough_nodes) /
+					sizeof(disabled_passthrough_nodes[0])) {
+			struct wlr_scene_node *passthrough_node = &con->scene_tree->node;
+			if (passthrough_node->enabled) {
+				disabled_passthrough_nodes[disabled_passthrough_count++] =
+					passthrough_node;
+				wlr_scene_node_set_enabled(passthrough_node, false);
+				continue;
+			}
+		}
+
+		surface_from_scene_node(scene_node, surface);
+
+		if (con) {
+			matched_node = &con->node;
+			break;
+		}
+
+		if (blocks_feedthrough) {
+			feedthrough_blocked = true;
+			break;
+		}
+
+		break;
+	}
+
+	while (disabled_passthrough_count > 0) {
+		wlr_scene_node_set_enabled(
+			disabled_passthrough_nodes[--disabled_passthrough_count], true);
+	}
+
+	if (matched_node) {
+		return matched_node;
+	}
+
+	if (feedthrough_blocked) {
+		return NULL;
 	}
 
 	// if we aren't on a container, determine what workspace we are on

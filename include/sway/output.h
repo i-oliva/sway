@@ -94,6 +94,9 @@ struct sway_output *output_get_in_direction(struct sway_output *reference,
 void output_configure_scene(struct sway_output *output,
 	struct wlr_scene_node *node, float opacity);
 
+struct wlr_buffer *output_capture_filter(struct wlr_output *wlr_output,
+	const struct wlr_output_state *state);
+
 void output_add_workspace(struct sway_output *output,
 		struct sway_workspace *workspace);
 

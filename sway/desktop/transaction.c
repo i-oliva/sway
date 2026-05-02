@@ -39,6 +39,18 @@ struct sway_transaction_instruction {
 	bool waiting;
 };
 
+static bool is_natively_view(struct sway_view *view) {
+	if (!view) {
+		return false;
+	}
+
+	const char *app_id = view_get_app_id(view);
+	const char *class = view_get_class(view);
+	return
+		(app_id && strcmp(app_id, "natively") == 0) ||
+		(class && strcmp(class, "natively") == 0);
+}
+
 static struct sway_transaction *transaction_create(void) {
 	struct sway_transaction *transaction =
 		calloc(1, sizeof(struct sway_transaction));
@@ -515,7 +527,8 @@ static void arrange_workspace_floating(struct sway_workspace *ws) {
 		}
 
 		if (root->fullscreen_global) {
-			if (container_is_transient_for(floater, root->fullscreen_global)) {
+			if (container_is_transient_for(floater, root->fullscreen_global) ||
+					is_natively_view(floater->view)) {
 				layer = root->layers.fullscreen_global;
 			}
 		} else {
@@ -523,14 +536,18 @@ static void arrange_workspace_floating(struct sway_workspace *ws) {
 				struct sway_output *output = root->outputs->items[i];
 				struct sway_workspace *active = output->current.active_workspace;
 
-				if (active && active->fullscreen &&
-						container_is_transient_for(floater, active->fullscreen)) {
+				if (active && active->fullscreen && active == ws &&
+						(container_is_transient_for(floater, active->fullscreen) ||
+							is_natively_view(floater->view))) {
 					layer = root->layers.fullscreen;
 				}
 			}
 		}
 
 		wlr_scene_node_reparent(&floater->scene_tree->node, layer);
+		if (is_natively_view(floater->view)) {
+			wlr_scene_node_raise_to_top(&floater->scene_tree->node);
+		}
 		wlr_scene_node_set_position(&floater->scene_tree->node,
 			floater->current.x, floater->current.y);
 		wlr_scene_node_set_enabled(&floater->scene_tree->node, true);
