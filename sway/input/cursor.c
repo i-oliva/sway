@@ -126,9 +126,21 @@ static struct sway_container *container_from_scene_node(
 }
 
 static bool is_natively_pointer_passthrough(struct sway_view *view) {
-	if (!view) {
+	if (!view || view->destroying || !view->surface ||
+			!view->impl || !view->impl->get_string_prop) {
 		return false;
 	}
+
+#if WLR_HAS_XWAYLAND
+	if ((view->type == SWAY_VIEW_XDG_SHELL && !view->wlr_xdg_toplevel) ||
+			(view->type == SWAY_VIEW_XWAYLAND && !view->wlr_xwayland_surface)) {
+		return false;
+	}
+#else
+	if (view->type == SWAY_VIEW_XDG_SHELL && !view->wlr_xdg_toplevel) {
+		return false;
+	}
+#endif
 
 	const char *app_id = view_get_app_id(view);
 	const char *class = view_get_class(view);
